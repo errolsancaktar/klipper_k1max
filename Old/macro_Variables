@@ -1,0 +1,57 @@
+[gcode_macro PRINTER_VARS]
+description: Defines common configuration variables used by production G-code macros.
+
+; --- PARKING / SAFETY ---
+variable_x_park: 175.0
+variable_y_park: 300.0
+variable_z_park: 10.0
+variable_safe_z: 15.0            # Z height to lift to before homing Z or moving X/Y
+
+; --- COOLING ---
+variable_cooling_override_active: False
+variable_park_x_cooling: 0
+variable_park_y_cooling: 280
+
+; --- PRESENT / CURRENT POSITION ---
+variable_x_present: 175
+variable_y_present: 0
+variable_z_present: 0
+
+; --- MOTION LIMITS ---
+variable_max_accel: 20000        # Max acceleration for travel/moves
+variable_max_velocity: 500       # Max velocity for travel/moves
+variable_purge_length: 100       # Length of the purge line in START_PRINT
+
+; --- GENERAL SAFETY/MOVEMENT VARS ---
+variable_z_lift_delta: 20.0      # Z distance to lift above current height for travel (_PARK_POSITION)
+variable_z_absolute_min: 25.0    # Absolute minimum Z height for safe travel (_PARK_POSITION)
+variable_z_present_min: 15.0     # Minimum Z height for PRESENT_TOOLHEAD safe movement
+
+; --- NOZZLE CLEANING VARS ---
+variable_clean_x_start: 160
+variable_clean_x_end: 200
+variable_clean_y_wipe: 290
+variable_clean_z_wipe: 0
+variable_park_x_clean: 5.0
+variable_park_y_clean: 290.0
+variable_park_z_clean: -1.0
+variable_clean_speed_fast: 20000
+variable_clean_speed_slow: 5000
+variable_clean_speed_rub: 300
+variable_clean_speed_hot_rub: 10000
+
+; --- CALIBRATION VARS (G28, QGL, MESH) ---
+variable_z_homing_lift: 5.0
+variable_qgl_z_hop: 2.0
+variable_mesh_temps: [60, 100, 110]
+
+; --- SPEED TEST VARS ---
+variable_speed_test_bound: 20
+variable_speed_test_small_size: 20
+variable_pre_home_offset: 50
+variable_home_xy_inset: 1
+
+; --- Z CYCLE TEST VARS ---
+variable_z_cycle_max: 280
+variable_z_cycle_min: 10
+gcode:

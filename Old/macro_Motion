@@ -1,0 +1,136 @@
+
+[force_move]
+enable_force_move: true
+
+
+
+
+[gcode_macro CENTER]
+gcode:
+    G90
+    G0 X{ printer.toolhead.axis_maximum.x/2 } Y{ printer.toolhead.axis_maximum.y/2 } Z{ printer.toolhead.axis_maximum.z/2 } F7200    
+
+[gcode_macro PRESENT_TOOLHEAD]
+description: Moves the toolhead to a safe, visible position (front center) for filament changes or print removal.
+gcode:
+    {% set PROD_VARS = printer["gcode_macro PRINTER_VARS"] %}
+    {% set Z_SAFE_MIN = PROD_VARS.z_present_min|float %} 
+    {% set X_TARGET = PROD_VARS.x_present|float %}
+    {% set Y_TARGET = PROD_VARS.y_present|float %}
+    {% set Z_TARGET = PROD_VARS.z_present|float %}     
+    {% set X_MAX = printer.toolhead.axis_maximum.x %}
+    {% set Y_MIN = printer.toolhead.axis_minimum.y %}
+    {% set Z_MAX = printer.toolhead.axis_maximum.z %}
+    {% set FINAL_Z = [Z_TARGET, Z_MAX] |min %}
+    {% set CURRENT_X = printer.toolhead.position.x|float %}
+    {% set CURRENT_Y = printer.toolhead.position.y|float %}
+    {% set CURRENT_Z = printer.toolhead.position.z|float %}
+
+    ; --- 2. PRE-CHECK AND HOMING 🏠 ---
+    {% if not 'x' in printer.toolhead.homed_axes or not 'y' in printer.toolhead.homed_axes or not 'z' in printer.toolhead.homed_axes %}
+        M117 Axes not homed. Running G28...
+        G28 ; Home all axes if any are not homed
+    {% endif %}
+
+    ; --- 3. SAFETY AND Z HEIGHT DETERMINATION 📐 ---
+    
+    ; Ensure target X/Y positions are within bounds (should be true after homing and with specified values)
+    {% if CURRENT_X < 0 or CURRENT_X > printer.toolhead.axis_maximum.x or CURRENT_Y < 0 or CURRENT_Y > printer.toolhead.axis_maximum.y %}
+        {action_respond_info("PRESENT_PRINTER ABORTED: Target coordinates are outside printer limits.")}
+    {% else %}
+
+        SAVE_GCODE_STATE NAME=present_state
+        G90 ; Ensure absolute coordinates are used
+
+        M117 Presenting Toolhead...
+
+        ; Move X and Y in a Safe Manner to get to Front
+        G0 X{X_MAX} Z{FINAL_Z} F6000
+        G0 Y{Y_MIN} F6000
+        
+        ; Move X and Y to the presentation position
+        G0 X{X_TARGET} Y{Y_TARGET} F6000
+        
+        ; 4. FINAL Z POSITION
+        ; Move Z to the calculated safe height slowly
+        ; G0 Z{FINAL_Z} F600 ; This line is commented out in your original but included here for completeness if you meant to uncomment it
+        
+        M117 Printer Ready
+
+    {% endif %}
+
+[gcode_macro _PARK_POSITION]
+description: Safely lifts Z based on criteria, clears X/Y, moves to park XY, then moves Z to final park height.
+gcode:
+    G90 ; Ensure Absolute coordinates
+
+    ; *** ADDED SAFETY CHECK: Skip movements if axes are not homed ***
+    {% if not 'x' in printer.toolhead.homed_axes or not 'y' in printer.toolhead.homed_axes or not 'z' in printer.toolhead.homed_axes %}
+        RESPOND MSG="WARNING: Cannot Park Safely. Axes X, Y, or Z are not homed. Skipping movement." TYPE=warning
+        {% set skip_moves = True %} 
+    {% else %}
+        {% set skip_moves = False %}
+    {% endif %}
+
+    {% if not skip_moves %}
+        ; *** 1. RETRIEVE CONFIGURATION VARIABLES (from Production PRINTER_VARS) ***
+        {% set PROD_VARS = printer["gcode_macro PRINTER_VARS"] %}
+        {% set P_X_TARGET = PROD_VARS.x_park|float %}
+        {% set P_Y_TARGET = PROD_VARS.y_park|float %}
+        {% set P_Z_TARGET = PROD_VARS.z_park|float %}
+
+        {% set Z_LIFT_DELTA = PROD_VARS.z_lift_delta|float %}
+        {% set Z_ABS_MIN = PROD_VARS.z_absolute_min|float %}
+        {% set Y_THRESH = PROD_VARS.y_interference_threshold|float %}
+
+        {% set CURRENT_X = printer.toolhead.position.x|float %}
+        {% set CURRENT_Y = printer.toolhead.position.y|float %}
+        {% set CURRENT_Z = printer.toolhead.position.z|float %}
+        {% set Z_MAX = printer.toolhead.axis_maximum.z|float %}
+        
+        ; Retrieve current position
+        {% set cur_z = printer['gcode_move'].gcode_position[2] %}
+
+        ; *** 3. DEFINE SAFETY CRITERIA ***
+        {% set Z_RELATIVE_LIFT = CURRENT_Z + Z_LIFT_DELTA %} ; Use the new delta var
+        
+        ; Absolute minimum safe height 
+        {% set Z_ABSOLUTE_MIN = [Z_ABS_MIN, CURRENT_Z]|max %} ; Use the new absolute min var
+        
+        ; --- 4. CONDITIONAL Z ADJUSTMENT ---
+        
+        ; If any part of the print extended beyond Y threshold, force Z lift higher
+        {% if CURRENT_Y > Y_THRESH %} ; Use the new threshold var
+            {% set Z_ABSOLUTE_MIN = Z_RELATIVE_LIFT %} ; Forces the Z_RELATIVE_LIFT to be used
+            RESPOND MSG="Interference Y position detected ({CURRENT_Y}mm). Forcing Z lift to {Z_LIFT_DELTA}mm over last Z height."
+        {% endif %}
+
+        ; --- 5. CALCULATE FINAL Z HEIGHTS ---
+        
+        ; Choose the highest of: (Z_ABSOLUTE_MIN) OR (Z_RELATIVE_LIFT).
+        {% set Z_SAFE_TRAVEL = [Z_ABSOLUTE_MIN, Z_RELATIVE_LIFT]|max %}
+
+        ; Ensure Z_SAFE_TRAVEL does not exceed Z_MAX 
+        {% set Z_PARK_START = [Z_SAFE_TRAVEL, Z_MAX]|min %}
+
+        ; --- 6. PARK SEQUENCE (Z-LIFT FIRST) ---
+        
+        ; 1. Move Z UP to the safe travel height (G1 for reliability)
+        G1 Z{Z_PARK_START} F6000 
+        
+        ; 2. Move X and Y to their maximum positions to clear the print area (G1 for reliability)
+        G1 X{printer.toolhead.axis_maximum.x|float} F15000
+        G1 Y{printer.toolhead.axis_maximum.y|float} F15000 
+        
+        ; 3. Move X/Y to Final Park Position (G1 for reliability)
+        G1 X{P_X_TARGET} Y{P_Y_TARGET} F15000
+        
+        ; Determine where Z shoudl finally be
+        {% set Z_FINAL = [P_Z_TARGET,Z_PARK_START]|max %}
+        
+        ; 4. Move Z to Final Resting Height (Added XY target again for absolute final position safety)
+        G1 X{P_X_TARGET} Y{P_Y_TARGET} Z{Z_FINAL} F6000
+        
+        ; ENSURE NO RESPOND MSG OR M117 HERE IN THE _PARK_POSITION MACRO
+    {% endif %}
+                

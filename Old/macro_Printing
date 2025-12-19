@@ -1,0 +1,243 @@
+[gcode_macro START_PRINT]
+; EXAMPLE: START_PRINT BED_TEMP=[bed_temperature_initial_layer_single] EXTRUDER_TEMP=[nozzle_temperature_initial_layer] CHAMBER_TEMP=[chamber_temperature] FILAMENT="[filament_type]" mesh_min={adaptive_bed_mesh_min[0]},{adaptive_bed_mesh_min[1]} mesh_max={adaptive_bed_mesh_max[0]},{adaptive_bed_mesh_max[1]} ALGORITHM=[bed_mesh_algo] PROBE_COUNT={bed_mesh_probe_count[0]},{bed_mesh_probe_count[1]} ADAPTIVE=0 ADAPTIVE_MARGIN=0
+description: Standard G-code executed at the start of every print job.
+gcode:
+    ; New variable names matching the Orca Slicer G-code
+    {% set BED_TEMP = params.BED_TEMP|default(60)|float %}
+    {% set EXTRUDER_TEMP = params.EXTRUDER_TEMP|default(200)|float %}
+    {% set CHAMBER_TEMP = params.CHAMBER_TEMP|default(0)|float %}
+    {% set FILAMENT = params.FILAMENT|default("PLA")|string %}
+
+    ; Adaptive Meshing Parameters (Passed as X,Y comma-separated strings)
+    {% set VARS = printer["gcode_macro PRINTER_VARS"] %}
+    {% set LEVELING_TEMP = VARS.leveling_temp|float %}
+    {% set MESH_MIN = params.MESH_MIN|default("0,0") %}
+    {% set MESH_MAX = params.MESH_MAX|default("0,0") %}
+    {% set PROBE_COUNT_X = params.PROBE_COUNT_X|default(0)|int %}
+    {% set PROBE_COUNT_Y = params.PROBE_COUNT_Y|default(0)|int %}
+    {% set ALGORITHM = params.ALGORITHM|default("bicubic") %}
+    
+
+    ; --- 1. START HEATING IMMEDIATELY (NON-BLOCKING) ---
+    M117 Starting Heat Soak and Pre-Heat...
+    M140 S{BED_TEMP} ; Set final bed temp (Slicer's BED_TEMP)
+    M104 S{LEVELING_TEMP} ; Set Extruder to MINIMUM Cleaning/Leveling Temp
+
+    {% if CHAMBER_TEMP|float > 0 %}
+        M141 S{CHAMBER_TEMP}              ; Set chamber temp (non-blocking)
+    {% endif %}
+    G4 P0 ; <-- Added separator
+
+    M117 Homing...
+    G28                                   ; Home all axes
+    EXHAUST_FAN_CONTROL FILAMENT={FILAMENT} ; Start chamber control early (if defined)
+
+    ; Wait for Extruder to reach minimum temperature for cleaning/QGL probing
+    M117 Waiting for Extruder to reach {LEVELING_TEMP}°C for Cleaning/QGL.
+    M109 S{LEVELING_TEMP} ; BLOCKING WAIT for extruder
+    
+    ; Wait for Bed Temperature to stabilize (CRITICAL FOR MESH ACCURACY/QGL accuracy)
+    M117 Waiting for Bed to stabilize at {BED_TEMP}°C for Leveling...
+    M190 S{BED_TEMP} ; BLOCKING WAIT for the bed to reach the target temperature
+
+    ; --- 3. CRITICAL LEVELING SEQUENCE (USES NEW G32) ---
+    M117 Performing Leveling Sequence
+    G32
+
+    ; --- 4. FINAL HEAT & MESH LOAD ---
+    M117 Setting Extruder to final print temperature {EXTRUDER_TEMP}°C
+    M104 S{EXTRUDER_TEMP} ; Set Extruder to Final Print Temp (Non-Blocking)
+    
+    ; Load Bed Mesh (Done after final stable temperature and QGL)
+    ; --- ADAPTIVE MESHING / STATIC FALLBACK ---
+    M117 Checking Bed Mesh...
+    {% if PROBE_COUNT_X > 0 and PROBE_COUNT_Y > 0 %}
+        M117 Adaptive Bed Mesh: {MESH_MIN} to {MESH_MAX}
+        BED_MESH_CLEAR
+        ; Use the passed parameters directly
+        BED_MESH_CALIBRATE MESH_MIN={MESH_MIN} MESH_MAX={MESH_MAX} PROBE_COUNT={PROBE_COUNT_X},{PROBE_COUNT_Y} ALGORITHM={ALGORITHM}
+    {% else %}
+        ; Static Meshing Fallback
+        M117 No Adaptive Info, Standard Calibration
+        BED_MESH_CALIBRATE
+    {% endif %}
+    G4 P0 ; <-- Added separator
+
+    ; Wait for Extruder Temperature to stabilize (Blocking Wait)
+    M117 Waiting for Extruder to reach {EXTRUDER_TEMP}°C
+    M109 S{EXTRUDER_TEMP} ; BLOCKING WAIT for extruder
+    
+    M220 S100                             ; Reset Feedrate
+    M221 S100                             ; Reset Flowrate
+
+    ; --- 5. PRIME AND START ---
+    M117 Priming
+    NOZZLE_PRIME
+
+    M117 Printing...
+
+[gcode_macro END_PRINT]
+description: Standard G-code executed at the end of every print job.
+gcode:
+    M400                                  ; Wait for moves to finish
+    M104 S0                               ; Turn off extruder
+    M140 S0                               ; Turn off bed
+
+    M117 Cleaning up...
+    G92 E0 ; Reset Extruder
+    G91 ; Relative positioning                       ; Relative positioning
+    {% if printer[printer.toolhead.extruder].temperature >= printer.configfile.settings.extruder.min_extrude_temp %}
+        G1 E-3 F1800 ; Retract slightly ONLY if hot enough
+    {% else %}
+        RESPOND MSG="WARNING: Too cold for retraction. Skipping"
+    {% endif %}
+     ; --- PARK SAFELY using the defined macro ---
+    SAVE_GCODE_STATE NAME=park_state
+    _PARK_POSITION ; This handles Z lift, and X/Y movement.
+    RESTORE_GCODE_STATE NAME=park_state MOVE=0
+     ; Klipper-native: Turn off heaters
+    SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0
+    SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0
+    TURN_OFF_FANS
+    ; --- CRITICAL: RESET COOLING OVERRIDE FOR NEXT PRINT ---
+    SET_GCODE_VARIABLE MACRO=PRINTER_VARS VARIABLE=cooling_override_active VALUE=True
+    
+    ; Klipper-native: Disable Steppers
+    SET_IDLE_TIMEOUT TIMEOUT=10
+    ; Filament Sensor Disabled
+    RESPOND MSG="Filament Sensor Disabled"
+    M117 Print Finished
+    RESPOND MSG="Print Finished"
+
+[gcode_macro G32]
+description: Homes (G28), cleans the nozzle, runs Quad Gantry Leveling (QGL), and homes Z again.
+gcode:
+    SAVE_GCODE_STATE NAME=G32_STATE
+    M117 Starting G32 (Home, Clean)
+    
+    M117 Clearing Bed Mesh
+    BED_MESH_CLEAR ; Clear old mesh (now explicitly preceded by a message)
+    
+    G28 ; Home X, Y, and Z
+    NOZZLE_CLEAN ; Ensure the probe/nozzle tip is clean for accurate probing 
+    
+    ; Re-home Z to apply the leveled gantry and clean probe offset
+    G28 Z 
+    M117 G32 Complete
+    RESTORE_GCODE_STATE NAME=G32_STATE
+
+[gcode_macro PAUSE]
+description: Pause the running print and move the toolhead to a safe location.
+rename_existing: PAUSE_BASE
+gcode:
+    ; Parameters
+    {% set z = params.Z|default(10)|int %}
+    
+    {% if printer['pause_resume'].is_paused|int == 0 %}     
+        SET_GCODE_VARIABLE MACRO=RESUME VARIABLE=zhop VALUE={z}                     ; set z hop variable for reference in resume macro
+        SET_GCODE_VARIABLE MACRO=RESUME VARIABLE=etemp VALUE={printer['extruder'].target}    ; set hotend temp variable for reference in resume macro
+        
+        SET_FILAMENT_SENSOR SENSOR=filament_movement ENABLE=0                      ; disable filament sensor         
+        SAVE_GCODE_STATE NAME=PAUSE                                                ; save current print position for resume                 
+        PAUSE_BASE                                                                 ; pause print
+        
+        {% if (printer.gcode_move.position.z + z) < printer.toolhead.axis_maximum.z %}        ; check that zhop doesn't exceed z max
+            G91                                                                    ; relative positioning
+            G1 Z{z} F900                                                           ; raise Z up by z hop amount
+            PRESENT_TOOLHEAD                                                          ; Executes the custom parking routine
+        {% else %}
+            { action_respond_info("Pause zhop exceeds maximum Z height.") }             ; if z max is exceeded, show message and set zhop value for resume to 0
+            SET_GCODE_VARIABLE MACRO=RESUME VARIABLE=zhop VALUE=0
+        {% endif %}
+        
+        G90                                                                        ; absolute positioning
+        RESTORE_GCODE_STATE NAME=PAUSE MOVE=1 MOVE_SPEED=6000 ; Move to last position before park. Use this to ensure it's positioned for the save.
+        SAVE_GCODE_STATE NAME=PAUSEPARK                                            ; save parked position in case toolhead is moved during the pause (otherwise the return zhop can error) 
+        
+        M104 S0                                                                    ; turn off hotend
+        SET_IDLE_TIMEOUT TIMEOUT=43200                                             ; set timeout to 12 hours
+    {% endif %}
+
+[gcode_macro RESUME]
+description: Resume the current print (handles M600 and standard PAUSE)
+rename_existing: RESUME_BASE
+gcode:
+  RESTORE_E_CURRENT
+
+  {% set PAUSE_HOTEND_TEMP = printer['gcode_macro PRINTER_VARS'].hotend_temp|int %}
+  {% set PAUSE_FAN2_SPEED = printer['gcode_macro PRINTER_VARS'].fan2_speed|float %}
+
+  ; 1. Restore Hotend Temp (M600/PAUSE)
+  {% if PAUSE_HOTEND_TEMP != 0 %}
+      RESPOND TYPE=command MSG="Starting hotend heating to {PAUSE_HOTEND_TEMP}°C..."
+      M109 S{PAUSE_HOTEND_TEMP} ; Wait for target temp
+      SET_GCODE_VARIABLE MACRO=PRINTER_VARS VARIABLE=hotend_temp VALUE=0
+  {% endif %}
+
+  ; 2. Restore Fan2 (Aux Fan - M600/PAUSE) - FIXED TO USE SET_PIN
+  {% if PAUSE_FAN2_SPEED > 0 and 'aux_fan' in printer %}
+      ; Restore the raw value (0.0 to 1.0) saved from the output_pin.
+      SET_PIN PIN=aux_fan VALUE={PAUSE_FAN2_SPEED}
+      SET_GCODE_VARIABLE MACRO=PRINTER_VARS VARIABLE=fan2_speed VALUE=0
+  {% endif %}
+
+  ; --- M600-Specific Logic ---
+  {% if printer["gcode_macro M600"].m600_state == 1 %}
+
+      ; Restore Fan0 (Part Fan - M600 only) - FIXED TO USE SET_FAN_SPEED
+      {% set M600_FAN0_SPEED = printer['gcode_macro M600'].fan0_speed|float %}
+      {% if M600_FAN0_SPEED > 0 and 'fan' in printer %}
+          ; Restore the raw speed (0.0 to 1.0) saved from the fan object.
+          SET_FAN_SPEED FAN=fan SPEED={M600_FAN0_SPEED}
+          SET_GCODE_VARIABLE MACRO=M600 VARIABLE=fan0_speed VALUE=0
+      {% endif %}
+
+      ; Reset M600 state and timeout
+      SET_GCODE_VARIABLE MACRO=M600 VARIABLE=m600_state VALUE=0
+      SET_IDLE_TIMEOUT TIMEOUT=1800
+      RESPOND TYPE=command MSG="action:prompt_end"
+
+  ; --- Standard PAUSE Logic ---
+  {% else %}
+      {% set E = printer["gcode_macro PAUSE"].extrude|float + 1.0 %}
+      {% if printer.extruder.can_extrude|lower == 'true' %}
+          G91
+          G1 E{E} F2100 ; Prime before resuming print
+          G90
+          M400
+      {% else %}
+          RESPOND TYPE=command MSG="Extruder not hot enough! Skipping resume prime."
+      {% endif %}
+  {% endif %}
+
+  {% set get_params = ('VELOCITY=' + params.VELOCITY) if 'VELOCITY' in params|upper else "" %}
+
+  RESPOND TYPE=command MSG="Resuming printing..."
+  RESUME_BASE {get_params}
+
+[gcode_macro CANCEL_PRINT]
+rename_existing: BASE_CANCEL_PRINT
+description: Safely cancels the current print, turns off all heaters, and parks the toolhead.
+gcode:
+    M117 Cancelling Print
+    M220 S100                          ; Reset speed factor
+    M221 S100                          ; Reset extrusion rate
+    M104 S0                            ; Turn off hotend
+    M140 S0                            ; Turn off bed
+    
+    TURN_OFF_FANS               
+    
+    CLEAR_PAUSE                        ; Clear any active pause state
+
+    G91                                ; Relative positioning
+    G1 Z10 F3000                       ; Raise Z by 10mm (safe move)
+    G90                                ; Absolute positioning
+    
+    ; --- CRITICAL: RESET COOLING OVERRIDE FOR NEXT PRINT ---
+    SET_GCODE_VARIABLE MACRO=PRINTER_VARS VARIABLE=cooling_override_active VALUE=True
+    
+    _PARK_POSITION                     ; Move to the dedicated park position
+    M84                                ; Disable motors
+    BASE_CANCEL_PRINT                  ; Call the original Klipper cancel command
+
+

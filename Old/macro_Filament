@@ -1,0 +1,403 @@
+
+
+[gcode_macro _LOAD_FILAMENT]
+description: K1 tuned load sequence for M600
+gcode:
+  RESTORE_E_CURRENT
+  M109 S{printer['gcode_macro PRINTER_VARS'].hotend_temp|int} ; Wait for stored temp
+  RESPOND TYPE=command MSG="Loading filament..."
+  G91
+  G1 E100 F180 ; Fast long push
+  G90
+  M400
+  SET_E_MIN_CURRENT
+
+[gcode_macro UNLOAD_FILAMENT]
+description: Unloads filament with a special hot-pull routine to prevent clogs (push/pull/slow-retract).
+gcode:
+    SAVE_GCODE_STATE NAME=unload_state
+    G91 ; Relative moves
+    
+    ; Determine target temperature. Use 220C as default.
+    {% set TARGET_TEMP = params.TEMP|default(220, true) %}
+    
+    ; Heat Check: Heat up if a TEMP is specified OR if the hotend is too cold to extrude.
+    {% if printer.extruder.target|float < TARGET_TEMP|float or printer.extruder.can_extrude|lower == 'false' %}
+        M117 Heating extruder to {TARGET_TEMP|int}C...
+        
+        ; Set the temperature (Klipper native)
+        SET_HEATER_TEMPERATURE HEATER=extruder TARGET={TARGET_TEMP|int}
+        
+        ; Wait for the extruder to reach the required temperature (Klipper native)
+        TEMPERATURE_WAIT SENSOR=extruder MINIMUM={TARGET_TEMP|int}
+        
+        M117 Extruder ready.
+    {% endif %}
+    
+    RESTORE_E_CURRENT
+    M109 S{printer['gcode_macro PRINTER_VARS'].hotend_temp|int} ; Wait for stored temp
+    RESPOND TYPE=command MSG="Unloading filament..."
+    M83 ; Relative extrusion
+    # --- K1 tuned retraction sequence ---
+    G1 E10 F300
+    G1 E-15 F3000
+    G1 E-22.4700 F2400
+    G1 E-6.4200 F1200
+    G1 E-3.2100 F720
+    G1 E5.0000 F356
+    G1 E-5.0000 F384
+    G1 E5.0000 F412
+    G1 E-5.0000 F440
+    G1 E5.0000 F467
+    G1 E-5.0000 F495
+    G1 E5.0000 F523
+    G1 E-5.0000 F3000
+    G1 E-15 F3000
+    SET_E_MIN_CURRENT
+
+    M117 Filament unloaded!
+    RESPOND MSG="Filament unloaded! Please inspect the tip of the filament before reloading."
+    RESTORE_GCODE_STATE NAME=unload_state
+
+[gcode_macro _LOAD_FILAMENT_CORE]
+description: Internal macro for the final loading and purge sequence with manual delay.
+gcode:
+    SAVE_GCODE_STATE NAME=_load_core_state EXCLUDE_EXTRUDER=1
+    G91 ; Relative moves
+    G92 E0 ; Reset Extruder position
+
+    # 5-second delay for manual placement before the machine takes over
+    M117 Filament detected. Please feed to extruder and wait 5s...
+    RESPOND MSG="Filament detected. Please feed to extruder and wait 5s..."
+    G4 P5000 
+    
+    M117 Auto-Loading filament...
+    
+    # --- Extrusion sequence ---
+    G0 E100 F600 ; Load the filament quickly
+    G4 P1000 ; Wait a second for filament to reach the hotend
+    G0 E40 F100 ; Purge slowly
+    M400 ; Wait for purge to complete
+
+    M117 Filament loaded!
+    RESPOND MSG="Filament loaded!"
+    RESTORE_GCODE_STATE NAME=_load_core_state EXCLUDE_EXTRUDER=1
+
+
+# --- PUBLIC LOAD MACRO (Handles Heating) ---
+[gcode_macro LOAD_FILAMENT]
+description: Loads filament, purges, and waits for completion.
+gcode:
+    SAVE_GCODE_STATE NAME=load_state
+    
+    ; Determine target temperature. Use 220C as default.
+    {% set TARGET_TEMP = params.TEMP|default(220, true) %}
+    
+    ; Check if current temperature is below target and if it's too cold to extrude
+    {% if printer.extruder.target|float < TARGET_TEMP|float or printer.extruder.can_extrude|lower == 'false' %}
+        M117 Heating extruder to {TARGET_TEMP|int}C...
+        
+        ; Set the temperature (Klipper native)
+        SET_HEATER_TEMPERATURE HEATER=extruder TARGET={TARGET_TEMP|int}
+        
+        ; Wait for the extruder to reach the required temperature (Klipper native)
+        TEMPERATURE_WAIT SENSOR=extruder MINIMUM={TARGET_TEMP|int}
+        
+        M117 Extruder ready.
+    {% endif %}
+
+    RESTORE_E_CURRENT
+    G91
+    G1 E100 F180 ; Fast long push
+    G90
+    M400
+    SET_E_MIN_CURRENT
+
+    _LOAD_FILAMENT_CORE
+    
+    RESTORE_GCODE_STATE NAME=load_state
+
+[gcode_macro CHANGE_FILAMENT]
+description: Filament change G-code. Pauses the print and executes the UNLOAD routine.
+variable_m600_state: 0 ; 0: Not running, 1: Active
+variable_fan0_speed: 0 ; Stores fan0 speed (Part Fan)
+gcode:
+  {% set E = printer["gcode_macro PAUSE"].extrude|float %}
+  {% set y_park = printer.toolhead.axis_minimum.y|float + 5.0 %}
+  {% set x_park = printer.toolhead.axis_maximum.x|float - 10.0 %}
+
+  {% set max_z = printer.configfile.settings['stepper_z'].position_max|float %}
+  {% set act_z = printer.toolhead.position.z|float %}
+  {% set z_safe = 0.0 %}
+
+  ; Z-lift calculation (same as PAUSE)
+  {% if act_z < 48.0 %}
+      {% set z_safe = 50.0 - act_z %}
+  {% elif act_z < (max_z - 2.0) %}
+      {% set z_safe = 2.0 %}
+  {% elif act_z < max_z %}
+      {% set z_safe = max_z - act_z %}
+  {% endif %}
+
+  {action_respond_info("z_safe = %s"% (z_safe))}
+  SET_GCODE_VARIABLE MACRO=M600 VARIABLE=m600_state VALUE=1
+  SET_GCODE_VARIABLE MACRO=PRINTER_VARS VARIABLE=hotend_temp VALUE={printer.extruder.target}
+  SET_GCODE_VARIABLE MACRO=PRINTER_VARS VARIABLE=z_safe_pause VALUE={z_safe|float}
+  RESPOND TYPE=command MSG="Print paused for filament change!"
+
+  PAUSE_BASE ; Call the original pause logic
+
+  G91
+  {% if "xyz" in printer.toolhead.homed_axes %}
+      {% if printer.extruder.can_extrude|lower == 'true' %}
+          G1 E-1.0 F180
+          G1 E-{E} F4000 ; Retract
+      {% else %}
+          RESPOND TYPE=command MSG="Extruder not hot enough! Skipping pre-unload retract."
+      {% endif %}
+      G1 Z{z_safe} F600 ; Lift
+      M400
+      G90
+      G1 X{x_park} Y{y_park} F30000 ; Park at front
+  {% endif %}
+
+  UNLOAD_FILAMENT ; Initial unload
+
+  ; Save and turn off fans
+  ; Save Aux Fan speed (uses SET_PIN/output_pin value)
+  SET_GCODE_VARIABLE MACRO=PRINTER_VARS VARIABLE=fan2_speed VALUE={printer['output_pin aux_fan'].value}
+  
+  ; Save Part Fan speed (uses SET_FAN_SPEED/fan object speed)
+  {% if 'fan' in printer %}
+      SET_GCODE_VARIABLE MACRO=M600 VARIABLE=fan0_speed VALUE={printer.fan.speed}
+  {% else %}
+      SET_GCODE_VARIABLE MACRO=M600 VARIABLE=fan0_speed VALUE=0.0
+  {% endif %}
+  
+  ; Turn off fans using the correct object names/commands
+  SET_FAN_SPEED FAN=fan SPEED=0.0  ; Part Cooling Fan ([fan] object)
+  SET_PIN PIN=aux_fan VALUE=0.0    ; Auxiliary Fan ([output_pin aux_fan])
+
+  SET_IDLE_TIMEOUT TIMEOUT=900 ; Reduce idle timeout to 15 mins while paused
+
+  SET_IDLE_TIMEOUT TIMEOUT=900 ; Reduce idle timeout to 15 mins while paused
+  SET_E_MIN_CURRENT
+
+  RESPOND TYPE=command MSG="action:prompt_begin Filament change detected!"
+  RESPOND TYPE=command MSG="action:prompt_text A necessary filament change has been detected. Please replace filament, LOAD it and click RESUME button."
+  RESPOND TYPE=command MSG="action:prompt_button UNLOAD FILAMENT|_UNLOAD_FILAMENT|secondary"
+  RESPOND TYPE=command MSG="action:prompt_button LOAD FILAMENT|_LOAD_FILAMENT|secondary"
+  RESPOND TYPE=command MSG="action:prompt_button PURGE MORE FILAMENT|_PURGE_MORE|secondary"
+  RESPOND TYPE=command MSG="action:prompt_footer_button CANCEL PRINT|CANCEL_PRINT|error"
+  RESPOND TYPE=command MSG="action:prompt_footer_button IGNORE|RESPOND TYPE=command MSG=action:prompt_end|warning"
+  RESPOND TYPE=command MSG="action:prompt_footer_button RESUME|RESUME|primary"
+  RESPOND TYPE=command MSG="action:prompt_show"
+
+[gcode_macro M600]
+description: Filament Change routine with safety checks and screen prompt
+gcode:
+    CHANGE_FILAMENT
+
+[gcode_macro EXHAUST_FAN_CONTROL]
+description: Controls chamber/aux fan for print cooling (ON for PLA/PETG, OFF for ABS/ASA).
+gcode:
+    {% set FILAMENT_TYPE = params.FILAMENT|default("PLA")|string %} 
+    {% set NO_COOL_TYPES = ('ABS', 'ASA', 'NYLON') %}
+    
+    {% if 'exhaust_fan' in printer %}
+        {% if FILAMENT_TYPE in NO_COOL_TYPES %}
+            SET_FAN_SPEED FAN=exhaust_fan SPEED=0.0 
+        {% else %}
+            SET_FAN_SPEED FAN=exhaust_fan SPEED=1.0
+        {% endif %}
+    {% else %}
+        RESPOND MSG="WARNING: Fan 'exhaust_fan' is not defined in config, skipping fan control."
+    {% endif %}
+
+    
+[gcode_macro _PURGE_MORE]
+description: Purge 10mm more for M600
+gcode:
+  RESTORE_E_CURRENT
+  M109 S{printer['gcode_macro PRINTER_VARS'].hotend_temp|int} ; Wait for stored temp
+  RESPOND TYPE=command MSG="Purging filament..."
+  G91
+  G1 E10 F180
+  G90
+  M400
+  SET_E_MIN_CURRENT
+
+
+
+
+[gcode_macro RESUME]
+description: Resume the current print (handles M600 and standard PAUSE)
+rename_existing: RESUME_BASE
+gcode:
+  RESTORE_E_CURRENT
+
+  {% set PAUSE_HOTEND_TEMP = printer['gcode_macro PRINTER_VARS'].hotend_temp|int %}
+  {% set PAUSE_FAN2_SPEED = printer['gcode_macro PRINTER_VARS'].fan2_speed|float %}
+
+  ; 1. Restore Hotend Temp (M600/PAUSE)
+  {% if PAUSE_HOTEND_TEMP != 0 %}
+      RESPOND TYPE=command MSG="Starting hotend heating to {PAUSE_HOTEND_TEMP}°C..."
+      M109 S{PAUSE_HOTEND_TEMP} ; Wait for target temp
+      SET_GCODE_VARIABLE MACRO=PRINTER_VARS VARIABLE=hotend_temp VALUE=0
+  {% endif %}
+
+  ; 2. Restore Fan2 (Aux Fan - M600/PAUSE)
+  {% if PAUSE_FAN2_SPEED > 0 %}
+      {% set fan2_min = printer['gcode_macro PRINTER_VARS'].fan2_min|float %}
+      ; K1 fan speed calculation
+      {% set s_value_2 = (PAUSE_FAN2_SPEED * 255.0 - fan2_min) * 255.0 / (255.0 - fan2_min) %}
+      M106 P2 S{s_value_2}
+      SET_GCODE_VARIABLE MACRO=PRINTER_VARS VARIABLE=fan2_speed VALUE=0
+  {% endif %}
+
+  ; --- M600-Specific Logic ---
+  {% if printer["gcode_macro M600"].m600_state == 1 %}
+
+      ; Restore Fan0 (Part Fan - M600 only)
+      {% set M600_FAN0_SPEED = printer['gcode_macro M600'].fan0_speed|float %}
+      {% if M600_FAN0_SPEED > 0 %}
+          {% set fan0_min = printer['gcode_macro PRINTER_VARS'].fan0_min|float %}
+          ; K1 fan speed calculation
+          {% set s_value_0 = (M600_FAN0_SPEED * 255.0 - fan0_min) * 255.0 / (255.0 - fan0_min) %}
+          M106 P0 S{s_value_0}
+          SET_GCODE_VARIABLE MACRO=M600 VARIABLE=fan0_speed VALUE=0
+      {% endif %}
+
+      ; Reset M600 state and timeout
+      SET_GCODE_VARIABLE MACRO=M600 VARIABLE=m600_state VALUE=0
+      SET_IDLE_TIMEOUT TIMEOUT=1800
+      RESPOND TYPE=command MSG="action:prompt_end"
+
+  ; --- Standard PAUSE Logic ---
+  {% else %}
+      {% set E = printer["gcode_macro PAUSE"].extrude|float + 1.0 %}
+      {% if printer.extruder.can_extrude|lower == 'true' %}
+          G91
+          G1 E{E} F2100 ; Prime before resuming print
+          G90
+          M400
+      {% else %}
+          RESPOND TYPE=command MSG="Extruder not hot enough! Skipping resume prime."
+      {% endif %}
+  {% endif %}
+
+  {% set get_params = ('VELOCITY=' + params.VELOCITY) if 'VELOCITY' in params|upper else "" %}
+
+  RESPOND TYPE=command MSG="Resuming printing..."
+  RESUME_BASE {get_params}
+
+[gcode_macro NOZZLE_PRIME]
+description: Performs a two-line purge/prime sequence at the front edge of the bed.
+gcode:
+    M117 Priming Nozzle
+    G92 E0                       ; Reset extruder
+    
+    ; --- SAFETY CHECK FOR RETRACTION ---
+    {% if printer[printer.toolhead.extruder].temperature >= printer.configfile.settings.extruder.min_extrude_temp %}
+        G1 E-3 F1800 ; Retract slightly ONLY if hot enough
+    {% else %}
+        RESPOND MSG="WARNING: Too cold for initial retraction in NOZZLE_PRIME. Skipping E-3."
+    {% endif %}
+    
+    {% set max_x = printer.toolhead.axis_maximum.x|float %}
+    
+    G1 X0 Y0 F10000              ; Move to start of prime line (corner of bed)
+    G1 Z0.3 F500                 ; Drop Z to print height
+    G92 E0                       ; Zero extruder before starting prime line
+    G1 E3 F500                   ; Push out material before main line
+
+    G92 E0                       ; Zero extruder again
+    G1 E-0.30000 F3600           ; Retract to relieve pressure
+
+    ; First prime line - Dynamic X length
+    G1 Z0.2500 F1000             ; Drop to first layer height
+    G1 X{max_x} Y0 E50 F1000     ; Draw long prime line across the full X width
+
+    G92 E0                       ; Zero extruder
+    G1 E-0.30000 F5400           ; Final retract
+    G1 Z10 F500                  ; Lift Z clear of the bed
+
+
+    [gcode_macro NOZZLE_CLEAN]
+description: Heats, purges, wipes on the brush, parks, performs a hot rub, cools, and performs a final cold rub on the bed
+gcode:
+    ; --- 1. PROCESS CONFIGURATION (These remain here) ---
+    {% set HOTEND_TEMP = 180 %}     ; Temperature to heat to for purging
+    {% set PURGE_AMOUNT = 15 %}      ; Amount of filament to purge (in mm)
+    {% set COOL_DOWN_TEMP = 150 %} ; Target temperature to wait for before finishing
+
+    ; --- 2. RETRIEVE MACHINE VARS (These are read from PRINTER_VARS) ---
+    {% set VARS = printer["gcode_macro PRINTER_VARS"] %}
+    
+    ; Wiping Coordinates
+    {% set X_START = VARS.clean_x_start|float %}
+    {% set X_END = VARS.clean_x_end|float %}
+    {% set Y_WIPE = VARS.clean_y_wipe|float %}
+    {% set Z_WIPE = VARS.clean_z_wipe|float %}
+    
+    ; Parking Coordinates
+    {% set PARK_X = VARS.park_x_clean|float %}
+    {% set PARK_Y = VARS.park_y_clean|float %}
+    {% set PARK_Z = VARS.park_z_clean|float %}
+    {% set SAFE_Z_LIFT = VARS.z_park|float %} ; Using the generic z_park height
+    
+    ; Speeds
+    {% set GENTLE_RUB_SPEED = VARS.clean_speed_rub|int %}
+    {% set HOT_RUB_SPEED = VARS.clean_speed_hot_rub|int %}
+
+    {% if X_END > printer.toolhead.axis_maximum.x or Y_WIPE > printer.toolhead.axis_maximum.y %}
+        {action_respond_info("NOZZLE_CLEAN ABORTED: Wiping coordinates are outside the configured printer limits.")}
+    {% else %}
+        SAVE_GCODE_STATE NAME=cleaning
+        ; 5. HEAT, PURGE, AND WIPE (BRUSH) 🌡️
+        M117 Heating and Purging...
+        M109 S{HOTEND_TEMP}     ; Wait for hotend to reach purge temperature
+        G0 Z{SAFE_Z_LIFT} F6000        ; Lift Z to safe height
+        G0 X{X_START} Y{Y_WIPE} F10000 ; Move to the start position (above the brush)
+        
+        M83                        ; Set Extruder to RELATIVE mode
+        G1 E{PURGE_AMOUNT} F600        ; Purge filament over the brush area
+        
+        
+        ; 6. FINAL PARK, HOT RUB, COOL-DOWN, AND COLD RUB ON BED ✨
+        M117 Parking, Hot Rub, and Cooling to {COOL_DOWN_TEMP}°C...
+        
+        ; Lift Z away from the brush
+        G0 Z{SAFE_Z_LIFT} F6000
+        
+        ; Move X/Y to the parking spot (e.g., front-left corner)
+        G0 X{PARK_X} Y{PARK_Y} F6000 
+        
+        ; A. Hot Rub (Initial Scrape)
+        G0 Z{PARK_Z} F600              ; Move down onto the bed (nozzle touches bed)
+        M117 Aggressive rub while still hot...
+        G0 X{PARK_X + 10} F{HOT_RUB_SPEED} ; Fast scrape to remove softened bulk
+        G0 X{PARK_X} F{HOT_RUB_SPEED}
+        
+        ; B. Start Cooling and Wait (NOZZLE REMAINS TOUCHING THE BED)
+        M104 S{COOL_DOWN_TEMP}         ; Set temperature target
+
+        ; --- Klipper Native Fan Control for Part Fan ---
+        SET_FAN_SPEED FAN=fan SPEED=0.5 ; Turn part cooling fan on temporarily (50%)
+
+        M117 Waiting for Nozzle to reach {COOL_DOWN_TEMP}°C
+        TEMPERATURE_WAIT SENSOR=extruder MINIMUM={COOL_DOWN_TEMP}
+
+        SET_FAN_SPEED FAN=fan SPEED=0.0 ; Turn part cooling fan off (Native M107 equivalent)
+        
+        ; C. Cold Rub (Final Scrape)
+        M117 Final gentle rub on the bed at low temperature...
+        G0 X{PARK_X + 5} F{GENTLE_RUB_SPEED}
+        G0 X{PARK_X} F{GENTLE_RUB_SPEED}
+
+        G0 Z{SAFE_Z_LIFT} F6000 ; <-- Manual lift to clear bed after final rub
+        M82 ; Set Extruder back to ABSOLUTE mode
+
+        RESTORE_GCODE_STATE NAME=cleaning MOVE=0 
+    
+    {% endif %}

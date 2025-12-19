@@ -1,0 +1,7 @@
+.ash_history
+.ssh/
+.gitold/
+*.log
+*.bak
+database/
+certs/

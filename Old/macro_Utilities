@@ -1,0 +1,392 @@
+
+[gcode_macro SET_QMODE]
+gcode:
+
+[gcode_macro M205]
+description: Sets Square Corner Velocity (Klipper SET_VELOCITY_LIMIT)
+gcode:
+  {% if 'X' in params or 'Y' in params %}
+    SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY={params.X|default(params.Y)}
+  {% endif %}
+
+[gcode_macro M900]
+description: Sets Pressure Advance (Klipper SET_PRESSURE_ADVANCE)
+gcode:
+  {% if 'K' in params %}
+    {% if 'E' in params %}
+      SET_PRESSURE_ADVANCE EXTRUDER={params.E} ADVANCE={params.K}
+    {% else %}
+      SET_PRESSURE_ADVANCE ADVANCE={params.K}
+    {% endif %}
+  {% endif %}
+
+
+
+[gcode_macro M109]
+rename_existing: M109.1
+gcode:
+    {% set t = params.S|float %}
+    M104 S{t}                                     ; Set hotend temp
+    {% if t != 0 %}
+        M109.1 S{t}                       ; Wait for hotend temp
+    {% endif %}
+
+[gcode_macro M190]
+rename_existing: M190.1
+gcode:
+    {% set t = params.S|float %}
+    M140 S{t}                                     ; Set bed temp
+    {% if t != 0 %}
+        M190.1 S{t}                       ; Wait for bed temp
+    {% endif %}
+
+[gcode_macro M140]
+rename_existing: M140.1
+gcode:
+    M140.1 {raw}
+
+[gcode_macro M104]
+rename_existing: M104.1
+gcode:
+    M104.1 {raw}
+
+
+[gcode_macro SET_QMODE]
+gcode:
+
+[gcode_macro M205]
+description: Sets Square Corner Velocity (Klipper SET_VELOCITY_LIMIT)
+gcode:
+  {% if 'X' in params or 'Y' in params %}
+    SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY={params.X|default(params.Y)}
+  {% endif %}
+
+[gcode_macro M900]
+description: Sets Pressure Advance (Klipper SET_PRESSURE_ADVANCE)
+gcode:
+  {% if 'K' in params %}
+    {% if 'E' in params %}
+      SET_PRESSURE_ADVANCE EXTRUDER={params.E} ADVANCE={params.K}
+    {% else %}
+      SET_PRESSURE_ADVANCE ADVANCE={params.K}
+    {% endif %}
+  {% endif %}
+
+
+
+[gcode_macro M109]
+rename_existing: M109.1
+gcode:
+    {% set t = params.S|float %}
+    M104 S{t}                                     ; Set hotend temp
+    {% if t != 0 %}
+        M109.1 S{t}                       ; Wait for hotend temp
+    {% endif %}
+
+[gcode_macro M190]
+rename_existing: M190.1
+gcode:
+    {% set t = params.S|float %}
+    M140 S{t}                                     ; Set bed temp
+    {% if t != 0 %}
+        M190.1 S{t}                       ; Wait for bed temp
+    {% endif %}
+
+[gcode_macro M140]
+rename_existing: M140.1
+gcode:
+    M140.1 {raw}
+
+[gcode_macro M104]
+rename_existing: M104.1
+gcode:
+    M104.1 {raw}
+
+[gcode_macro RESPOND]
+rename_existing: BASE_RESPOND
+gcode:
+    {% set colors = ('primary', 'secondary', 'accent', 'info', 'success', 'error', 'warning') %}
+
+    {% if params.PREFIX is defined %}
+        {% set prefix = 'PREFIX=' + params.PREFIX|string %}
+    {% endif %}
+
+    {% if params.TYPE is defined %}
+        {% set type_lower = params.TYPE|lower %}
+        {% if type_lower in ('echo', 'echo_no_space', 'command', 'error') and params.TYPE != '' %}
+            {% set type = 'TYPE=' + params.TYPE|string %}
+        {% else %}
+            BASE_RESPOND TYPE=error MSG="RESPOND TYPE {params.TYPE} is invalid. Must be one of 'echo', 'command' or 'error'"
+        {% endif %}
+    {% endif %}
+        
+    {% if params.MSG is defined %}   
+        {% set msg_content = params.MSG|string %}
+        
+        ; Handle color formatting for screen output
+        {% if params.COLOR is defined %}
+            {% set color = params.COLOR|lower %}
+
+            {% if color in colors %}
+                {% set msg = 'MSG="<span class=' + color + '--text>' + msg_content + '</span>"'|string %}
+            {% else %}
+                BASE_RESPOND TYPE=error MSG="RESPOND COLOR '{color}' is invalid. Must be one of 'primary', 'secondary', 'accent', 'info', 'success', 'warning' or 'error'"
+            {% endif %}
+        {% else %}
+             {% set msg = 'MSG="'+ msg_content + '"'|string %}
+        {% endif %}
+        
+    {% endif %}
+    
+    BASE_RESPOND {prefix} {type} {msg}
+
+[gcode_macro M117]
+rename_existing: M99117
+gcode:
+    {% set msg = params.MSG|default("")|string %}
+    
+    ; --- Only process and log if the message is NOT empty ---
+    {% if msg|length > 0 %}
+        ; 1. Output to Screen (original M117 behavior)
+        M99117 {msg}
+        
+        ; 2. Output to Klipper Log (Guaranteed)
+        {action_respond_info(msg)}
+    {% endif %}
+
+
+
+[gcode_macro GET_CURRENT_TEMP]
+description: Reports current heater and bed temperatures.
+gcode:
+    {% set E_T = printer.extruder.temperature|round(1) %}
+    {% set E_TT = printer.extruder.target|round(1) %}
+    {% set B_T = printer.heater_bed.temperature|round(1) %}
+    {% set B_TT = printer.heater_bed.target|round(1) %}
+    RESPOND MSG="CURRENT TEMP STATE: Extruder T={E_T} TGT={E_TT} | Bed T={B_T} TGT={B_TT}"   
+
+[gcode_macro M104]
+rename_existing: M99104
+gcode:
+    {% set TARGET_TEMP = params.S|float %}
+    {% set CURRENT_TEMP = printer.extruder.temperature|float %}
+    
+    {% set VARS = printer["gcode_macro PRINTER_VARS"] %}
+    {% set IS_OVERRIDE_ACTIVE = VARS.cooling_override_active|lower == 'true' %}
+    
+    ; --- 1. Execute Temperature Change (Non-Blocking) ---
+    M99104 {rawparams} 
+
+    ; --- 2. Check for Override and Cooling Requirement ---
+    
+    ; Logic runs ONLY if the override is active AND cooling is needed.
+    {% if IS_OVERRIDE_ACTIVE and CURRENT_TEMP > TARGET_TEMP + 10 and TARGET_TEMP < 180 %}
+        
+        M117 Extruder Cooling required, moving to park position...
+        
+        SAVE_GCODE_STATE NAME=COOL_PARK
+        
+        {% set PARK_X = VARS.park_x_cooling|float %}
+        {% set PARK_Y = VARS.park_y_cooling|float %}
+        {% set Z_LIFT = VARS.z_park|float %}
+        
+        ; Lift and park head
+        G90
+        G0 Z{Z_LIFT} F3000
+        G0 X{PARK_X} Y{PARK_Y} F6000
+        
+        M117 Head parked during initial cooling.
+        
+        RESTORE_GCODE_STATE NAME=COOL_PARK MOVE=0
+        
+    {% endif %}
+
+    ; --- 3. Normal Operation During Print ---
+    ; If IS_OVERRIDE_ACTIVE is False, the macro simply runs M99104 and then exits, 
+    ; allowing standard temperature changes during the print without parking.
+
+[gcode_macro DUMP_VARIABLES]
+description: Dumps all Klipper variables to the console, useful for debugging macros.
+gcode:
+    {% set filter_name = params.NAME|default('')|string|lower %}
+    {% set filter_value = params.VALUE|default('')|string|lower %}
+    {% set show_cfg = params.SHOW_CFG|default(0)|int %}
+    
+    {% set out = [] %}
+
+    ; Iterates through all printer objects to find variables matching optional filters
+    {% for key1 in printer %}
+        {% for key2 in printer[key1] %}
+            {% if (show_cfg or not (key1|lower == 'configfile' and key2|lower in ['config', 'settings'])) and (filter_name in key1|lower or filter_name in key2|lower) and filter_value in printer[key1][key2]|string|lower %}
+                {% set dummy = out.append("printer['%s'].%s = %s" % (key1, key2, printer[key1][key2])) %}
+            {% endif %}
+        {% else %}
+            {% if filter_name in key1|lower and filter_value in printer[key1]|string|lower %}
+                {% set dummy = out.append("printer['%s'] = %s" % (key1, printer[key1])) %}
+            {% endif %}
+        {% endfor %}
+    {% endfor %}
+    
+    {action_respond_info(out|join("\n"))}
+    
+[gcode_macro PSTATUS]
+gcode:
+    {% if params.S3 %}
+    {% set info = printer[params.S1][params.S2][params.S3] %}
+    {% elif params.S2 %}
+    {% set info = printer[params.S1][params.S2] %}
+    {% elif params.S1 %}
+    {% set info = printer[params.S1] %}
+    {% else %}
+    {% set	info = printer.idle_timeout.state %}
+    {% endif %}
+    {action_respond_info(info|string)}   
+
+[gcode_macro TURN_OFF_FANS]
+description: Turns off all configured [fan] and [fan_generic] objects.
+gcode:
+    RESPOND MSG="Turning off all standard fan objects..."
+    
+    ; Iterate through all fans in the printer state
+    {% for name, fan in printer %}
+        {% if name == 'fan' or name.startswith('fan_generic ') %}
+            
+            {% set fan_device = name.split(' ')[1] if ' ' in name else name %}
+            
+            ; Check if the fan object is defined in the live printer state
+            {% if fan_device in printer %}
+                SET_FAN_SPEED FAN={fan_device} SPEED=0.0
+                RESPOND MSG="Turned off fan device: {fan_device}"
+            {% endif %}
+        {% endif %}
+    {% endfor %}
+    
+    ; Klipper-native way to ensure the hotend fan is off if the hotend is cool
+    M104 S0 
+    
+    RESPOND MSG="All standard fans shut down."
+
+
+[gcode_macro M117]
+rename_existing: M99117
+gcode:
+    {% set msg = params.MSG|default("")|string %}
+    
+    ; --- Only process and log if the message is NOT empty ---
+    {% if msg|length > 0 %}
+        ; 1. Output to Screen (original M117 behavior)
+        M99117 {msg}
+        
+        ; 2. Output to Klipper Log (Guaranteed)
+        {action_respond_info(msg)}
+    {% endif %}
+
+
+
+[gcode_macro GET_CURRENT_TEMP]
+description: Reports current heater and bed temperatures.
+gcode:
+    {% set E_T = printer.extruder.temperature|round(1) %}
+    {% set E_TT = printer.extruder.target|round(1) %}
+    {% set B_T = printer.heater_bed.temperature|round(1) %}
+    {% set B_TT = printer.heater_bed.target|round(1) %}
+    RESPOND MSG="CURRENT TEMP STATE: Extruder T={E_T} TGT={E_TT} | Bed T={B_T} TGT={B_TT}"   
+
+[gcode_macro M104]
+rename_existing: M99104
+gcode:
+    {% set TARGET_TEMP = params.S|float %}
+    {% set CURRENT_TEMP = printer.extruder.temperature|float %}
+    
+    {% set VARS = printer["gcode_macro PRINTER_VARS"] %}
+    {% set IS_OVERRIDE_ACTIVE = VARS.cooling_override_active|lower == 'true' %}
+    
+    ; --- 1. Execute Temperature Change (Non-Blocking) ---
+    M99104 {rawparams} 
+
+    ; --- 2. Check for Override and Cooling Requirement ---
+    
+    ; Logic runs ONLY if the override is active AND cooling is needed.
+    {% if IS_OVERRIDE_ACTIVE and CURRENT_TEMP > TARGET_TEMP + 10 and TARGET_TEMP < 180 %}
+        
+        M117 Extruder Cooling required, moving to park position...
+        
+        SAVE_GCODE_STATE NAME=COOL_PARK
+        
+        {% set PARK_X = VARS.park_x_cooling|float %}
+        {% set PARK_Y = VARS.park_y_cooling|float %}
+        {% set Z_LIFT = VARS.z_park|float %}
+        
+        ; Lift and park head
+        G90
+        G0 Z{Z_LIFT} F3000
+        G0 X{PARK_X} Y{PARK_Y} F6000
+        
+        M117 Head parked during initial cooling.
+        
+        RESTORE_GCODE_STATE NAME=COOL_PARK MOVE=0
+        
+    {% endif %}
+
+    ; --- 3. Normal Operation During Print ---
+    ; If IS_OVERRIDE_ACTIVE is False, the macro simply runs M99104 and then exits, 
+    ; allowing standard temperature changes during the print without parking.
+
+[gcode_macro DUMP_VARIABLES]
+description: Dumps all Klipper variables to the console, useful for debugging macros.
+gcode:
+    {% set filter_name = params.NAME|default('')|string|lower %}
+    {% set filter_value = params.VALUE|default('')|string|lower %}
+    {% set show_cfg = params.SHOW_CFG|default(0)|int %}
+    
+    {% set out = [] %}
+
+    ; Iterates through all printer objects to find variables matching optional filters
+    {% for key1 in printer %}
+        {% for key2 in printer[key1] %}
+            {% if (show_cfg or not (key1|lower == 'configfile' and key2|lower in ['config', 'settings'])) and (filter_name in key1|lower or filter_name in key2|lower) and filter_value in printer[key1][key2]|string|lower %}
+                {% set dummy = out.append("printer['%s'].%s = %s" % (key1, key2, printer[key1][key2])) %}
+            {% endif %}
+        {% else %}
+            {% if filter_name in key1|lower and filter_value in printer[key1]|string|lower %}
+                {% set dummy = out.append("printer['%s'] = %s" % (key1, printer[key1])) %}
+            {% endif %}
+        {% endfor %}
+    {% endfor %}
+    
+    {action_respond_info(out|join("\n"))}
+    
+[gcode_macro PSTATUS]
+gcode:
+    {% if params.S3 %}
+    {% set info = printer[params.S1][params.S2][params.S3] %}
+    {% elif params.S2 %}
+    {% set info = printer[params.S1][params.S2] %}
+    {% elif params.S1 %}
+    {% set info = printer[params.S1] %}
+    {% else %}
+    {% set	info = printer.idle_timeout.state %}
+    {% endif %}
+    {action_respond_info(info|string)}   
+
+[gcode_macro TURN_OFF_FANS]
+gcode:
+    {% set fans = [] %}
+    {% for key in printer %}
+        {% if key.startswith("fan_generic") 
+        %}
+            {% set _ = fans.append(key) %}
+        {% endif %}
+    {% endfor %}
+
+    {% set fan_names = [] %}
+    {% for f in fans %}
+        {% set _ = fan_names.append(f.split(' ', 1)[1] if ' ' in f else f) %}
+    {% endfor %}
+
+    {% for fan in fan_names %}
+        RESPOND MSG="Turning off: { fan }"
+        SET_FAN_SPEED FAN={fan} SPEED=0
+    {% endfor %}
+
+    

@@ -1,0 +1,134 @@
+#####################################################################
+# I. SAFE XY MOVE
+#####################################################################
+[gcode_macro _SAFE_XY_MOVE]
+description: Moves Y for clearance if X/Y not homed and lifts Z safely
+gcode:
+  {% set Z_SAFE = printer['gcode_macro PRINTER_VARS'].variable_safe_z|float %}
+  
+  # Safe Z move
+  {% if 'Z' not in printer.toolhead.homed_axes %}
+      FORCE_MOVE STEPPER=stepper_z DISTANCE={Z_SAFE} VELOCITY=10
+  {% elif printer.toolhead.position.z < Z_SAFE %}
+      G91
+      G1 Z{Z_SAFE - printer.toolhead.position.z} F600
+      G90
+  {% endif %}
+
+  # Y clearance if X/Y not homed
+  {% if 'X' not in printer.toolhead.homed_axes or 'Y' not in printer.toolhead.homed_axes %}
+      FORCE_MOVE STEPPER=stepper_y DISTANCE=-14 VELOCITY=50
+      FORCE_MOVE STEPPER=stepper_y DISTANCE=7 VELOCITY=50
+      G4 P1000
+  {% endif %}
+
+
+#####################################################################
+# II. HOME MACROS
+#####################################################################
+[gcode_macro _HOME_X]
+description: Custom X homing with safe moves and park logic
+gcode:
+  _SAFE_XY_MOVE
+
+  {% if 'X' in printer.toolhead.homed_axes and (printer.configfile.settings['stepper_x'].position_max - printer.toolhead.position.x)|round < 10 %}
+      {% set x_park = (10 - (printer.configfile.settings['stepper_x'].position_max - printer.toolhead.position.x))|round %}
+      {% if x_park > 0 %}
+          G91
+          G1 X-{x_park} F3600
+          G90
+          G4 P500
+      {% endif %}
+  {% endif %}
+
+  G28 X
+  G91
+  G1 X-10 F3600
+  G90
+  G4 P2000
+
+
+[gcode_macro _HOME_Y]
+description: Custom Y homing with safe moves and park logic
+gcode:
+  _SAFE_XY_MOVE
+
+  {% if 'Y' in printer.toolhead.homed_axes and printer.toolhead.position.y|round < 8 %}
+      {% set y_park = 8 - printer.toolhead.position.y|round %}
+      {% if y_park > 0 %}
+          G91
+          G1 Y{y_park} F3600
+          G90
+          G4 P500
+      {% endif %}
+  {% endif %}
+
+  G28 Y
+  G91
+  G1 Y10 F3600
+  G90
+  G4 P2000
+
+
+[gcode_macro _HOME_Z]
+description: Custom Z homing with safe move logic and bed mesh load
+gcode:
+  {% set Z_SAFE = printer['gcode_macro PRINTER_VARS'].variable_safe_z|float %}
+
+  # Only move Z if X/Y homed
+  {% if 'X' in printer.toolhead.homed_axes and 'Y' in printer.toolhead.homed_axes %}
+      {% if 'Z' not in printer.toolhead.homed_axes %}
+          FORCE_MOVE STEPPER=stepper_z DISTANCE={Z_SAFE} VELOCITY=10
+      {% elif printer.toolhead.position.z < Z_SAFE %}
+          G91
+          G1 Z{Z_SAFE - printer.toolhead.position.z} F600
+          G90
+      {% endif %}
+  {% endif %}
+
+  # Drop Z if too high
+  {% if printer.toolhead.position.z|float >= 260 %}
+      FORCE_MOVE STEPPER=stepper_z DISTANCE=-8 VELOCITY=10
+  {% endif %}
+
+  # Park toolhead for Z home
+  G90
+  G1 X150 Y150 F3600
+  G28 Z
+  BED_MESH_PROFILE LOAD="default"
+
+
+#####################################################################
+# III. HOMING OVERRIDE
+#####################################################################
+[homing_override]
+axes: xyz
+gcode:
+    M220 S100
+    BED_MESH_CLEAR
+
+    {% set home_all = 'X' not in params and 'Y' not in params and 'Z' not in params %}
+    {% if home_all or 'X' in params %}
+        _HOME_X
+    {% endif %}
+    {% if home_all or 'Y' in params %}
+        _HOME_Y
+    {% endif %}
+    {% if home_all or 'Z' in params %}
+        _HOME_Z
+    {% endif %}
+
+    G4 P500
+
+
+#####################################################################
+# IV. CHECK HOMED MACRO
+#####################################################################
+[gcode_macro CHECK_HOMED]
+gcode:
+    {% set homed_axes = printer.toolhead.homed_axes %}
+    {% if homed_axes %}
+        RESPOND MSG="Homed axes: {{ homed_axes|join(', ') }}"
+    {% else %}
+        RESPOND MSG="No axes homed yet"
+    {% endif %}
