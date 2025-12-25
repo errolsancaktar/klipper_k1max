@@ -3,3 +3,5 @@
 	name = K1 Max Auto Sync
 [core]
 	sshCommand = ssh -i /root/.ssh/github_key.db -o StrictHostKeyChecking=no
+[http]
+	sslVerify = false
